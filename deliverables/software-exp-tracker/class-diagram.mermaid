@@ -1,0 +1,368 @@
+classDiagram
+    %% ============ 识别内核: vision ============
+    class RegionRect {
+        +number x
+        +number y
+        +number w
+        +number h
+    }
+    class PixelSource {
+        <<interface>>
+        +number width
+        +number height
+        +Uint8ClampedArray data
+    }
+    class Glyph {
+        +string ch
+        +number w
+        +number h
+        +Float32Array data
+    }
+    class TemplateBank {
+        +string scaleKey
+        +Map~string,Glyph~ glyphs
+        +number canonW
+        +number canonH
+        +buildFromSource(source) TemplateBank
+        +addGlyph(ch, glyph) void
+        +serialize() object
+        +static deserialize(obj) TemplateBank
+    }
+    class ExpBarProfile {
+        +Float64Array columns
+        +number width
+    }
+    class RatioResult {
+        +number ratio
+        +boolean isFull
+        +boolean isEmpty
+        +number confidence
+    }
+    class ReadDigitsResult {
+        +number value
+        +string text
+        +number confidence
+        +number minMargin
+        +Array glyphScores
+    }
+    class VisionModule {
+        <<module>>
+        +fillness(r, g, b) number
+        +otsu(values) number
+        +columnProfile(src, rect, percentile) ExpBarProfile
+        +ratioFromProfiles(frames, opts) RatioResult
+        +binarize(src) PixelSource
+        +splitByProjection(bin, maxCharW) Segment[]
+        +tightBBox(img, thr) BBox
+        +drawToCanvas(img, cw, ch) PixelSource
+        +ncc(a, b) number
+        +readDigits(src, rect, bank, opts) ReadDigitsResult
+        +buildDefaultBank(fontFamily, size, scale) TemplateBank
+    }
+
+    PixelSource <.. ExpBarProfile : columnProfile()
+    TemplateBank o-- Glyph
+    ExpBarProfile ..> RatioResult : ratioFromProfiles()
+    TemplateBank ..> ReadDigitsResult : readDigits()
+
+    %% ============ 自举经验表: estimator ============
+    class ExpReading {
+        +number absolute
+        +number ratio
+        +boolean estimated
+        +number requiredExp
+        +number sourceAt
+    }
+    class Range {
+        +number minimum
+        +number maximum
+    }
+    class ObserveResult {
+        +boolean accepted
+        +number requiredExp
+        +boolean approximate
+        +boolean confirming
+    }
+    class LevelState {
+        +number confirmed
+        +CandidateSample[] samples
+        +number[] zeroSamples
+        +boolean zeroConfirmed
+    }
+    class CandidateSample {
+        +number absolute
+        +number ratio
+        +Range range
+        +number sourceAt
+    }
+    class ExpRequirementEstimator {
+        -Map levels
+        +reset(seed) void
+        +seed(level, reading) void
+        +observe(level, reading, sourceAt, opts) ObserveResult
+        +requirementFor(level) number
+        -observeRequirementCandidate(state, reading, range, sourceAt, need) number
+    }
+    class RangeModule {
+        <<module>>
+        +rangeFromReading(reading, precision) Range
+        +intersectRanges(ranges) Range
+        +rangeContains(range, value) boolean
+        +pickFromRange(range, floor, requiredExp) number
+        +ratioToAbsolute(reading) number
+        +isConsistent(reading, requiredExp, precision) boolean
+    }
+
+    ExpRequirementEstimator o-- LevelState
+    LevelState o-- CandidateSample
+    CandidateSample --> Range
+    ExpRequirementEstimator ..> ObserveResult
+    ExpRequirementEstimator ..> ExpReading
+
+    %% ============ 记录状态机: record ============
+    class RecordSession {
+        +string id
+        +number startedAt
+        +RecordStatus status
+        +number levelStart
+        +number levelEnd
+        +number netExp
+        +number expPerHour
+        +number goldPerHour
+        +Segment[] segments
+        +LevelUpEvent[] levelUps
+        +ReadState readState
+        +start(now) void
+        +pause(now) void
+        +resume(now) void
+        +ingestSample(sample, now) IngestResult
+        +finish(now) Record
+    }
+    class RecordStatus {
+        <<enumeration>>
+        idle
+        recording
+        paused
+        finishing
+        saving
+        ended
+    }
+    class ReadState {
+        <<enumeration>>
+        waiting
+        accumulating
+        confirming
+        confirmed
+        missingCrossLevel
+        timeout
+        interrupted
+        unconfirmedNet
+        recovered
+    }
+    class RateComparison {
+        +number last60s
+        +number overallAvg
+        +number diffRatio
+        +boolean arrowVisible
+        +boolean arrowUp
+        +push(now, expPerHour) void
+    }
+    class Segment {
+        +number startT
+        +number endT
+        +boolean isRecoveredStart
+        +boolean confirmed
+    }
+    class LevelUpEvent {
+        +number t
+        +number fromLevel
+        +number toLevel
+    }
+    class IngestResult {
+        +ReadState readState
+        +boolean changedMetrics
+        +string[] notices
+    }
+
+    RecordSession --> RecordStatus
+    RecordSession --> ReadState
+    RecordSession o-- Segment
+    RecordSession o-- LevelUpEvent
+    RecordSession *-- RateComparison
+    RecordSession *-- ExpRequirementEstimator
+    RecordSession ..> IngestResult
+
+    %% ============ 采集管线 ============
+    class StartMsg {
+        +string type
+        +number fps
+    }
+    class TickMsg {
+        +string type
+        +number t
+        +number seq
+    }
+    class FrameGrabber {
+        -HTMLVideoElement video
+        -OffscreenCanvas canvas
+        +attach(stream) void
+        +grabRect(norm) PixelSource
+        +grabAll() PixelSource
+    }
+    class CaptureLoop {
+        -RecordSession session
+        -TemplateBank bank
+        -ExpBarProfile[] frameBuffer
+        +onTick(t) void
+        +reset() void
+    }
+    CaptureLoop --> FrameGrabber
+    CaptureLoop --> RecordSession
+    CaptureLoop --> TemplateBank
+
+    %% ============ 持久化: db ============
+    class MapLogDatabase {
+        <<Dexie>>
+        +Table records
+        +Table samples
+        +Table calibration
+        +Table expTable
+        +Table kv
+    }
+    class Record {
+        +string id
+        +number createdAt
+        +number endedAt
+        +number durationMs
+        +RecordStatus status
+        +number levelStart
+        +number levelEnd
+        +number netExp
+        +number expPerHour
+        +number goldPerHour
+        +number goldStart
+        +number goldEnd
+        +LevelUpEvent[] levelUps
+        +Segment[] segments
+        +EfficiencyTier efficiencyTier
+        +string classId
+        +ClientInfo clientInfo
+        +number schemaVersion
+    }
+    class Sample {
+        +string id
+        +string recordId
+        +number t
+        +number expRaw
+        +number expPct
+        +number level
+        +number expNeeded
+        +number gold
+        +number hp
+        +number mp
+        +number confidence
+        +ReadState readState
+    }
+    class RegionKey {
+        <<enumeration>>
+        expBar
+        expText
+        level
+        gold
+        hp
+        mp
+    }
+    class CalibrationConfig {
+        +number version
+        +string screenKey
+        +Region regions.expBar
+        +Region regions.expText
+        +Region regions.level
+        +Region regions.gold
+        +Region regions.hp
+        +Region regions.mp
+        +boolean expSplit
+        +number updatedAt
+    }
+    class Region {
+        +number x
+        +number y
+        +number w
+        +number h
+        +RegionStatus status
+    }
+    class ExpTableRow {
+        +number level
+        +number requiredExp
+        +boolean approximate
+        +string source
+        +number updatedAt
+    }
+    class ClientInfo {
+        +number width
+        +number height
+        +string ua
+        +number calibVersion
+    }
+
+    MapLogDatabase "1" --> "*" Record : records
+    MapLogDatabase "1" --> "*" Sample : samples
+    MapLogDatabase "1" --> "*" CalibrationConfig : calibration
+    MapLogDatabase "1" --> "*" ExpTableRow : expTable
+    Record "1" --> "*" Sample : recordId
+    CalibrationConfig "1" o-- "6" Region : regions[RegionKey]
+    CalibrationConfig ..> RegionKey : keyed by
+    RegionKey ..> Region : key into regions
+    Record o-- ClientInfo
+
+    %% ============ Store ============
+    class StreamStore {
+        +MediaStream stream
+        +boolean connected
+        +connect() void
+        +disconnect() void
+    }
+    class CalibrationStore {
+        +CalibrationConfig config
+        +RegionStatusMap statuses
+        +autoDetect() void
+        +restoreDefault() void
+        +save() void
+    }
+    class SettingsStore {
+        +AppSettings settings
+        +setPerfTier(tier) void
+        +resetFactory() void
+    }
+    class RecordStore {
+        +RecordStatus status
+        +ReadState readState
+        +LevelInfo levelInfo
+        +number durationMs
+        +number netExp
+        +start() void
+        +pause() void
+        +resume() void
+        +finish() Record
+    }
+    class HistoryStore {
+        +Record[] records
+        +refresh() void
+        +remove(id) void
+        +clearAll() void
+        +exportAll() Blob
+        +importAll(file) void
+    }
+    class TemplatesStore {
+        +TemplateBank defaultBank
+        +TemplateBank customBank
+        +activeBank() TemplateBank
+        +saveCustom(bank) void
+    }
+
+    RecordStore --> StreamStore
+    RecordStore --> CalibrationStore
+    RecordStore --> SettingsStore
+    RecordStore --> TemplatesStore
+    HistoryStore ..> MapLogDatabase
+    RecordStore ..> MapLogDatabase

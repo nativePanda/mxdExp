@@ -1,0 +1,38 @@
+/**
+ * Element Plus 主题微调。
+ *
+ * 与 Tailwind 共存的注意事项：
+ * - Tailwind 的 preflight 会重置元素基础样式，可能影响 Element Plus 组件外观；
+ * - 本文件中的覆盖规则在 main.ts 中于 Element Plus 样式之后加载，保证优先级。
+ */
+
+/* 主色调对齐品牌橙黄色系 */
+:root {
+  --el-color-primary: #f59e0b;
+  --el-color-primary-light-3: #f7b955;
+  --el-color-primary-light-5: #f9ca7d;
+  --el-color-primary-light-7: #fcdba4;
+  --el-color-primary-light-8: #fde5c0;
+  --el-color-primary-light-9: #fef0db;
+  --el-color-primary-dark-2: #c47f08;
+}
+
+/* Element Plus 按钮去掉多余的字间距 */
+.el-button {
+  letter-spacing: 0;
+}
+
+/* 数字输入框使用等宽数字 */
+.el-input-number .el-input__inner {
+  font-variant-numeric: tabular-nums;
+}
+
+/* 卡片圆角统一 */
+.el-card {
+  border-radius: 8px;
+}
+
+/* 空状态文字颜色 */
+.el-empty__description p {
+  color: #909399;
+}

@@ -1,0 +1,158 @@
+%% =====================================================================
+%% 本地版冒险岛经验统计工具 —— 程序调用流程（时序图）配套文件
+%% 对应 architecture.md §4
+%% 含 3 条关键流程：4.1 初始化 / 4.2 单帧采集（核心）/ 4.3 结束保存
+%% =====================================================================
+
+
+%% ---------------------------------------------------------------------
+%% 4.1 初始化时序：连接窗口 → 校准 → 开始记录
+%% ---------------------------------------------------------------------
+sequenceDiagram
+    autonumber
+    actor U as 用户
+    participant P as PanelView
+    participant SS as StreamStore
+    participant GDM as navigator.mediaDevices
+    participant FC as FrameGrabber
+    participant CS as CalibrationStore
+    participant CV as CalibrationView
+    participant RS as RecordStore
+    participant DB as MapLogDatabase
+
+    U->>P: 点击「共享游戏窗口」
+    P->>SS: connect()
+    SS->>GDM: getDisplayMedia({video:{...}})
+    GDM-->>SS: MediaStream (video track)
+    SS->>FC: attach(stream)
+    FC->>FC: video.srcObject = stream; await play()
+    FC-->>SS: canvas 就绪
+    SS-->>P: connected=true
+    Note over SS: 监听 track.onended -> 提示重选
+
+    U->>P: 点击「去校准」
+    P->>CV: 路由跳转 /calibration
+    CV->>CS: load(screenKey)
+    CS->>DB: calibration.where(screenKey).first()
+    DB-->>CS: CalibrationConfig | undefined
+    alt 已有配置
+        CS-->>CV: 渲染已保存框选
+    else 无配置/分辨率变化
+        CV->>CS: autoDetect()
+        CS->>FC: grabAll()
+        FC-->>CS: ImageData
+        CS->>CS: 扫描定位经验条/金币/HP/MP
+        CS-->>CV: statuses(located/unlocated)
+    end
+    U->>CV: 拖动/缩放 4 个区域选框
+    CV->>CS: updateRegion(key, rect)  // 归一化坐标
+    CS->>DB: calibration.put(config)   // 调整即自动保存
+    DB-->>CS: ok
+    CS-->>CV: 保存成功（「上次保存 刚刚」）
+
+    U->>P: 回到面板，点击「开始记录」
+    P->>RS: start()
+    RS->>RS: RecordSession.start(performance.now())
+    RS->>RS: 载入经验表(内置样例 + 自举历史)
+    RS-->>P: status=recording, step3 完成
+    RS->>DB: (记录暂不落库，结束才写)
+
+
+%% ---------------------------------------------------------------------
+%% 4.2 单帧采集完整时序（核心）
+%% ---------------------------------------------------------------------
+sequenceDiagram
+    autonumber
+    participant W as capture.worker
+    participant CL as useCaptureLoop
+    participant FG as FrameGrabber
+    participant VIS as core/vision
+    participant EST as ExpRequirementEstimator
+    participant CG as confirmGate
+    participant RS as RecordSession
+    participant RC as RateComparison
+    participant UI as PanelView
+
+    W->>CL: postMessage({type:'tick', t, seq})   // Worker 定时器，抗后台节流
+
+    CL->>FG: grabRect(calib.expBar)              // 经验条填充区（比例）
+    FG-->>CL: ImageData(经验条)
+    CL->>VIS: columnProfile(img, rect, 0.3)
+    VIS-->>CL: ExpBarProfile
+    CL->>CL: frameBuffer.push(profile) (环形缓冲 FRAME_N=12)
+    CL->>VIS: ratioFromProfiles(frameBuffer)
+    Note over VIS: 逐列跨帧 2D 中值 -> Otsu -> 边界扫描<br/>（抗高光扫过 + 30 分位压掉叠字）
+    VIS-->>CL: RatioResult{ratio, isFull, confidence}
+
+    CL->>FG: grabRect(calib.expText)             // 经验数值文字区
+    FG-->>CL: ImageData(经验数值)
+    CL->>VIS: readDigits(img, rect, activeBank)
+    VIS-->>CL: ReadDigitsResult | null           // null=拒识
+    Note over CL,VIS: ☞ 默认 expBar 与 expText 为同一矩形<br/>（用户画一次即可）；拆分模式各抓一次
+
+    CL->>FG: grabRect(calib.gold)
+    FG-->>CL: ImageData(金币数值)
+    CL->>VIS: readDigits(...)
+    VIS-->>CL: {value} | null
+
+    opt seq % LEVEL_READ_EVERY_N === 0 或 isExpRatioDiscontinuity()
+        CL->>FG: grabRect(calib.level)           // 等级数字（选填区域）
+        FG-->>CL: ImageData(等级数值)
+        CL->>VIS: readDigits(...)                // 等级
+        VIS-->>CL: {value} | null
+    end
+
+    CL->>EST: observe(level, {absolute, ratio}, t)
+    EST->>EST: rangeFromReading / 交集 / 与 known 比对
+    EST-->>CL: ObserveResult{accepted, requiredExp, confirming}
+
+    CL->>CG: mapToReadState(observeResult, prevState, now)
+    CG-->>CL: ReadState
+    alt accepted
+        CL->>RS: ingestSample(sample, t)
+        RS->>RC: push(t, expPerHour)
+        RC->>RC: 4%/2%/1.5s hysteresis 推进
+        RS-->>CL: IngestResult{readState, changedMetrics, notices}
+    else 拒识/不一致
+        RS-->>CL: readState=confirming/timeout（沿用上次确认值）
+    end
+
+    CL->>UI: 更新 store（响应式）
+    UI-->>UI: 渲染 经验卡/速率对比/确认状态/运行状态
+
+
+%% ---------------------------------------------------------------------
+%% 4.3 结束记录 → 保存 → 历史刷新
+%% ---------------------------------------------------------------------
+sequenceDiagram
+    autonumber
+    actor U as 用户
+    participant P as PanelView
+    participant RS as RecordStore
+    participant S as RecordSession
+    participant W as capture.worker
+    participant DB as MapLogDatabase
+    participant HS as HistoryStore
+    participant HV as HistoryView
+
+    U->>P: 点击「结束记录」
+    P->>RS: finish()
+    RS->>RS: status = finishing
+    RS->>S: session.finish(now)
+    S->>S: 关闭当前 Segment（confirmed 视情况）
+    S->>S: 汇总 netExp / expPerHour / goldPerHour / efficiencyTier
+    S->>S: 若存在未确认区间 -> netExp=null + readState=unconfirmedNet
+    S-->>RS: Record 对象
+    RS->>W: postMessage({type:'stop'})
+    W-->>RS: 定时器已停
+    RS->>RS: status = saving
+    RS->>DB: records.add(record)
+    RS->>DB: samples.bulkAdd(pendingSamples)
+    DB-->>RS: ok
+    RS->>RS: status = ended
+    RS-->>P: 提示「已保存」
+
+    Note over HS: HistoryStore 用 Dexie liveQuery 订阅 records
+    DB-->>HS: on('changes') -> records 更新
+    HS-->>HV: records 响应式刷新（按 createdAt 倒序）
+    HV-->>U: 新记录出现在列表顶部
